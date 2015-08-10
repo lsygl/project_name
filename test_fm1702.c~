@@ -1,0 +1,308 @@
+#include <stdint.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <getopt.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <linux/types.h>
+
+#include "spidev.h"
+#include "FM1702_drv.h"
+
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+
+static void pabort(const char *s)
+{
+	perror(s);
+	
+	abort();
+}
+
+static const char *device = "/dev/spidev2.0";
+static uint8_t mode;
+static uint8_t bits = 8;
+static uint32_t speed = 400 * 1000;//500000;
+static uint16_t delay;
+
+int g_SPI_Fd = 0;
+
+unsigned char UID[5], Temp[4];
+
+
+int WriteRawRC(int addr, int data)
+{
+	int ret;
+	int fd = g_SPI_Fd;
+	unsigned char  TxBuf[2];
+
+	//bit7:MSB=0,bit6~1:addr,bit0:RFU=0
+	TxBuf[0] = ((unsigned char)addr << 1)&0x7E;
+	//TxBuf[0] &= 0x7E;
+
+	TxBuf[1] = (unsigned char)data;
+	
+	ret = write(fd, TxBuf, 2);
+	if (ret < 0)
+		printf("spi:SPI Write error\n");
+
+	usleep(10);
+
+	return ret;
+}
+
+unsigned char ReadRawRC(int addr)
+{
+	int ret;
+	int fd = g_SPI_Fd;
+	unsigned char  ReData;
+	unsigned char  Address;
+	
+	Address  = (unsigned char)addr << 1;
+	Address |= (1 << 7);
+	Address &= ~(1 << 0);
+	
+	ret = write(fd, &Address, 1);
+	if (ret < 0)
+		printf("spi:SPI Write error\n");
+
+	usleep(100);
+
+	ret = read(fd, &ReData, 1);
+	if (ret < 0)
+		printf("spi:SPI Read error\n");
+
+	return ReData;
+}
+
+void SetBitMask(unsigned char reg,unsigned char mask)  
+{
+  	char tmp = 0x0;
+	
+  	tmp = ReadRawRC(reg) | mask;
+	
+  	WriteRawRC(reg,tmp | mask);
+}
+
+void ClearBitMask(unsigned char reg, unsigned char mask)  
+{
+	char tmp = 0x0;
+	
+	tmp = ReadRawRC(reg)&(~mask);
+	
+	WriteRawRC(reg, tmp);  // clear bit mask
+}
+
+unsigned char FM1715_Bus_Sel(void)
+{
+    unsigned int   i;
+
+    WriteRawRC(Page_Sel,0x80);
+    for(i=0; i<RF_TimeOut; i++)
+    {
+        if(ReadRawRC(Command) == 0)
+        {
+            WriteRawRC(Page_Sel,0);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+
+int FM1702_init()
+{
+	int ret;
+	char version = 0 , count = 0;;
+#if 0
+	//reset
+	WriteRawRC(CommandReg, PCD_RESETPHASE);
+	usleep(10);
+	WriteRawRC(ModeReg, 0x3D);
+	WriteRawRC(TReloadRegL, 30);
+	WriteRawRC(TReloadRegH, 0);
+	WriteRawRC(TModeReg, 0x8D);
+	WriteRawRC(TPrescalerReg, 0x3E);
+
+	version = ReadRawRC(VersionReg);
+	printf("Chip Version: 0x%x\n", version);
+	usleep(50000);
+#endif
+	WriteRawRC(Page_Sel, 0x80);
+	for(count=100;count > 0;count--)
+        {
+		version = ReadRawRC(Page_Sel);
+		if(version == 0x80)	
+			break;		
+	}
+	if(count == 0)
+	{
+		printf("FM1702 Init Fail!");
+	}
+	else
+	{
+		printf("Check FM1702 OK!!!");
+		WriteRawRC(Page_Sel, 0x80);
+		WriteRawRC(Page_Sel, 0x80);
+		WriteRawRC(Page_Sel, 0x80);
+		WriteRawRC(Page_Sel, 0x80);
+		WriteRawRC(Page_Sel, 0x80);
+		WriteRawRC(Page_Sel, 0x80);
+	
+	}
+
+
+	return 0;
+}
+
+static void print_usage(const char *prog)
+{
+	printf("Usage: %s [-DsbdlHOLC3]\n", prog);
+	puts("  -D --device   device to use (default /dev/spidev1.1)\n"
+	     "  -s --speed    max speed (Hz)\n"
+	     "  -d --delay    delay (usec)\n"
+	     "  -b --bpw      bits per word \n"
+	     "  -l --loop     loopback\n"
+	     "  -H --cpha     clock phase\n"
+	     "  -O --cpol     clock polarity\n"
+	     "  -L --lsb      least significant bit first\n"
+	     "  -C --cs-high  chip select active high\n"
+	     "  -3 --3wire    SI/SO signals shared\n");
+	exit(1);
+}
+
+static void parse_opts(int argc, char *argv[])
+{
+	while (1) {
+		static const struct option lopts[] = {
+			{ "device",  1, 0, 'D' },
+			{ "speed",   1, 0, 's' },
+			{ "delay",   1, 0, 'd' },
+			{ "bpw",     1, 0, 'b' },
+			{ "loop",    0, 0, 'l' },
+			{ "cpha",    0, 0, 'H' },
+			{ "cpol",    0, 0, 'O' },
+			{ "lsb",     0, 0, 'L' },
+			{ "cs-high", 0, 0, 'C' },
+			{ "3wire",   0, 0, '3' },
+			{ "no-cs",   0, 0, 'N' },
+			{ "ready",   0, 0, 'R' },
+			{ NULL, 0, 0, 0 },
+		};
+		int c;
+
+		c = getopt_long(argc, argv, "D:s:d:b:lHOLC3NR", lopts, NULL);
+
+		if (c == -1)
+			break;
+
+		switch (c) {
+		case 'D':
+			device = optarg;
+			break;
+		case 's':
+			speed = atoi(optarg);
+			break;
+		case 'd':
+			delay = atoi(optarg);
+			break;
+		case 'b':
+			bits = atoi(optarg);
+			break;
+		case 'l':
+			mode |= SPI_LOOP;
+			break;
+		case 'H':
+			mode |= SPI_CPHA;
+			break;
+		case 'O':
+			mode |= SPI_CPOL;
+			break;
+		case 'L':
+			mode |= SPI_LSB_FIRST;
+			break;
+		case 'C':
+			mode |= SPI_CS_HIGH;
+			break;
+		case '3':
+			mode |= SPI_3WIRE;
+			break;
+		case 'N':
+			mode |= SPI_NO_CS;
+			break;
+		case 'R':
+			mode |= SPI_READY;
+			break;
+		default:
+			print_usage(argv[0]);
+			break;
+		}
+	}
+}
+
+int main(int argc, char *argv[])
+{
+	unsigned char i;
+	
+	int ret = 0;
+	int fd;
+
+	parse_opts(argc, argv);
+
+	fd = open(device, O_RDWR);
+	if (fd < 0)
+		pabort("can't open device");
+
+	g_SPI_Fd = fd;
+
+#if 0
+	/*
+	 * spi mode
+	 */
+	ret = ioctl(fd, SPI_IOC_WR_MODE, &mode);
+	if (ret == -1)
+		pabort("can't set spi mode");
+
+	ret = ioctl(fd, SPI_IOC_RD_MODE, &mode);
+	if (ret == -1)
+		pabort("can't get spi mode");
+
+	/*
+	 * bits per word
+	 */
+	ret = ioctl(fd, SPI_IOC_WR_BITS_PER_WORD, &bits);
+	if (ret == -1)
+		pabort("can't set bits per word");
+
+	ret = ioctl(fd, SPI_IOC_RD_BITS_PER_WORD, &bits);
+	if (ret == -1)
+		pabort("can't get bits per word");
+
+	/*
+	 * max speed hz
+	 */
+	ret = ioctl(fd, SPI_IOC_WR_MAX_SPEED_HZ, &speed);
+	if (ret == -1)
+		pabort("can't set max speed hz");
+
+	ret = ioctl(fd, SPI_IOC_RD_MAX_SPEED_HZ, &speed);
+	if (ret == -1)
+		pabort("can't get max speed hz");
+
+	printf("spi mode: %d\n", mode);
+	printf("bits per word: %d\n", bits);
+	printf("max speed: %d Hz (%d KHz)\n", speed, speed/1000);
+#endif
+
+	FM1702_init();
+#if 0
+	PcdAntennaOn();
+
+	HandleConfigMenu(i);
+
+	close(fd);
+#endif
+	return ret;
+}
+
+
